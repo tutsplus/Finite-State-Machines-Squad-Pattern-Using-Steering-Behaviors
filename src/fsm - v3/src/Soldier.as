@@ -1,0 +1,265 @@
+/**
+ * Copyright (c) 2013, Fernando Bevilacqua
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that the following conditions are met:
+ * 
+ *   Redistributions of source code must retain the above copyright notice, this
+ *   list of conditions and the following disclaimer.
+ * 
+ *   Redistributions in binary form must reproduce the above copyright notice, this
+ *   list of conditions and the following disclaimer in the documentation and/or
+ *   other materials provided with the distribution.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+package  
+{
+	import flash.events.NetStatusEvent;
+	import flash.geom.Vector3D;
+	import org.flixel.*;
+	
+	/**
+	 * The Soldier will follow the leader, shooting anything that gets to close.
+	 */
+	public class Soldier extends Character
+	{
+		private var mBrain 		:StackFSM;	// Controls the FSM stuff
+		private var mCaption 	:FlxText;	// a text field to show debug info
+		
+		public function Soldier(posX :Number, posY :Number, totalMass :Number) {
+			super(posX, posY, totalMass);
+			
+			makeGraphic(25, 25, 0xff00ff00);
+			addAnimation("walking",  [0, 1, 2, 3], 10);
+			addAnimation("shooting", [4, 5], 15);
+			play("walking");
+			
+			mBrain = new StackFSM();
+			
+			// Push the "follow" state so the soldier will follow the leader
+			mBrain.pushState(follow);
+			
+			mCaption = new FlxText(0, 0, 60, "Happy :)");
+			mCaption.color = 0x00ff00;
+		}
+		
+		override public function think():void {
+			// Update the brain. It will run the current state function.
+			mBrain.update();
+			
+			// Update the animations
+			if (mShooting <= 0 && _curAnim.name.indexOf("walking") == -1) {
+				play("walking", true);
+			}
+		}
+		
+		/**
+		 * The "follow" state.
+		 * 
+		 * It will make the soldier follow the leader, protecting him against the enemies.
+		 * If a monster gets too close, the soldier will hunt it down.
+		 */
+		public function follow() :void {
+			// If we're not shooting at something, follow the leader.
+			var aLeader :Boid = Game.instance.boids[0];
+			addSteeringForce(mBoid.followLeader(aLeader));
+			
+			// Is there a monster nearby?
+			if (getNearestEnemy() != null) {
+				// Yes, there is! Hunt it down!
+				// Push the "hunt" state. It will make the soldier stop following the leader and
+				// start hunting the monster.
+				mBrain.pushState(hunt);
+			} else {
+				// No monster around, so check if there is an item to collect (or run away from).
+				checkItemsNearby();
+			}
+			
+			// Debug info
+			mCaption.text  = "follow";
+			mCaption.color = 0x00ff00; 
+		}
+		
+		/**
+		 * The "hunt" state.
+		 * 
+		 * It will make the soldier hunt down the nearest enemy. After the monster is killed,
+		 * or after it leaves the hunting area, the state will be removed from the stack. 
+		 */
+		public function hunt() :void {
+			var aNearestEnemy :Monster = getNearestEnemy();
+
+			// Do we have a monster nearby?
+			if (aNearestEnemy != null) {
+				// Yes, we do. Let's calculate how distant it is.
+				var aDistance :Number = calculateDistance(aNearestEnemy, this);
+
+				// Is the monster close enough to shoot?
+				if (aDistance <= 80) {
+					// Yes, so let's face it!
+					faceEnemyStandingStill(aNearestEnemy);
+					// Fire away! Take that, monster!
+					shoot();
+					
+				} else {
+					// No, the monster is far away. Seek it until it gets close enough.
+					addSteeringForce(mBoid.seek(aNearestEnemy.boid.position));
+					
+					// Avoid crowding while seeking the target...
+					addSteeringForce(mBoid.separation());
+				}
+			} else {
+				// No, there is no monster nearby. Maybe it was killed or ran away. Let's pop the "hunt"
+				// state and come back doing what we were doing before the hunting.
+				mBrain.popState();
+
+				// Check if there is an item to collect (or run away from)
+				checkItemsNearby();
+			}
+			
+			// Debug info
+			mCaption.text  = "hunt";
+			mCaption.color = 0xffcc00; 
+		}
+		
+		/**
+		 * The "runAway" state.
+		 * 
+		 * It will make the soldier run away from the closest "bad" kit (dropped by the monsters).
+		 * If there is more than one bad kit nearby, the closest one is selected.
+		 */
+		public function runAway() :void {
+			var aItem :Item = getNearestItem();
+			
+			if (aItem != null && aItem.alive && aItem.type == Item.BADKIT) {
+				var aItemPos :Vector3D = new Vector3D();
+				aItemPos.x = aItem.x;
+				aItemPos.y = aItem.y;
+				addSteeringForce(mBoid.flee(aItemPos));
+				
+			} else {
+				mBrain.popState();
+			}
+			
+			// Debug info
+			mCaption.text  = "runAwayFromItem";
+			mCaption.color = 0xff0000; 
+		}
+		
+		/**
+		 * The "collectItem" state.
+		 * 
+		 * It will make the soldier to seek nearby items, trying to collect them. If there is
+		 * more than one item, the closest one is selected.
+		 */
+		public function collectItem() :void {
+			var aItem :Item = getNearestItem();
+			var aMonsterNearby :Boolean = getNearestEnemy() != null;
+			
+			if (!aMonsterNearby && aItem != null && aItem.alive && aItem.type == Item.MEDKIT) {
+				var aItemPos :Vector3D = new Vector3D();
+				aItemPos.x = aItem.x;
+				aItemPos.y = aItem.y;
+				addSteeringForce(mBoid.arrive(aItemPos, 50));
+				
+			} else {
+				mBrain.popState();
+			}
+			
+			mCaption.text  = "collectItem";
+			mCaption.color = 0x0088ff; 
+		}
+		
+		/**
+		 * Check if there is an item nearby. If the item is a medkit, change brain state
+		 * to "collectItem"; if the item is a bad kit, change brain state to "runAway".
+		 */
+		private function checkItemsNearby() :void {
+			var aItem :Item = getNearestItem();
+			
+			if (aItem != null) {
+				mBrain.pushState(aItem.type == Item.BADKIT ? runAway : collectItem);
+			}
+		}
+		
+		private function faceEnemyStandingStill(enemy :Monster) :void {
+			// Yes, so let's change the velocity (direction) of the soldier to face the monster
+			mBoid.velocity.x = enemy.x - x;
+			mBoid.velocity.y = enemy.y - y;
+			
+			// Scale the velocity close to zero to ensure the soldier will face
+			// the monster, but will remain still.
+			mBoid.velocity.scaleBy(0.001);			
+		}
+		
+		private function addSteeringForce(force :Vector3D) :void {
+			 mBoid.steering = mBoid.steering.add(force);
+		}
+		
+		private function getNearestEnemy() :Monster {
+			return getNearestThing((FlxG.state as PlayState).monsters.members) as Monster;
+		}
+		
+		private function getNearestItem() :Item {
+			return getNearestThing((FlxG.state as PlayState).items.members, 100) as Item;
+		}
+		
+		/**
+		 * Get the nearest thing from a group.
+		 * 
+		 * @param	theRadius the action radius
+		 * @param	theGroup the group of things from which the method will select something.
+		 * @return  the nearest thing in the group.
+		 */
+		private function getNearestThing(theGroup :Array, theRadius :Number = 150) :FlxSprite {
+			var aNearestThing 		:FlxSprite = null;
+			var aShortestDistance 	:Number = Number.MAX_VALUE;
+			var aDistance			:Number;
+			
+			for (var i:int = 0; i < theGroup.length; i++) {
+				if (theGroup[i] != null && theGroup[i].alive && theGroup[i].onScreen()) {
+					
+					aDistance = calculateDistance(theGroup[i], this);
+					
+					if(aDistance <= theRadius && aDistance < aShortestDistance) {
+						aShortestDistance 	= aDistance;
+						aNearestThing 		= theGroup[i];
+					}
+				}
+			}
+			
+			return aNearestThing;
+		}
+		
+		private function calculateDistance(a :FlxSprite, b :FlxSprite) :Number {
+			return Math.sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+		}
+		
+		override protected function updateShootingAnimation():void {
+			play("shooting", true);
+		}
+		
+		override public function draw():void {
+			super.draw();
+			
+			if((FlxG.state as PlayState).debug) {
+				mCaption.x = x;
+				mCaption.y = y - height;
+				
+				mCaption.draw();
+			}
+		}
+	}
+}
